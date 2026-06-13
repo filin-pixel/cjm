@@ -31,10 +31,13 @@ def get_giga_client(credentials):
 def call_gigachat(client, prompt, max_tokens=2000):
     """Универсальная функция вызова GigaChat с улучшенным парсингом JSON"""
     try:
+        # Параметры max_tokens и temperature передаются в объект Chat, а не в метод chat()
         response = client.chat(
-            Chat(messages=[Messages(role=MessagesRole.USER, content=prompt)]),
-            max_tokens=max_tokens,
-            temperature=0.3  # Меньше креативности, больше структуры
+            Chat(
+                messages=[Messages(role=MessagesRole.USER, content=prompt)],
+                max_tokens=max_tokens,
+                temperature=0.3
+            )
         )
         content = response.choices[0].message.content
         
@@ -59,7 +62,7 @@ def call_gigachat(client, prompt, max_tokens=2000):
                     # Ищем последнюю }
                     last_brace = content.rfind("}")
                     if last_brace > 0:
-                        content = content[:last_brace+1] + "]" if "cjm" in content else content[:last_brace+1]
+                        content = content[:last_brace+1]
                 elif content.startswith("["):
                     last_bracket = content.rfind("]")
                     if last_bracket > 0:
