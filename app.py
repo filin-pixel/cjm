@@ -3,7 +3,8 @@ import pandas as pd
 import json
 import io
 from datetime import datetime
-import openai
+from gigachat import GigaChat
+from gigachat.models import Chat, Messages, MessagesRole
 
 # --- НАСТРОЙКИ СТРАНИЦЫ ---
 st.set_page_config(page_title="CJM Generator Pro", page_icon="🗺️", layout="wide")
@@ -18,93 +19,101 @@ if 'common_scenario' not in st.session_state:
 if 'cjms' not in st.session_state:
     st.session_state.cjms = {}
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ (REAL LLM) ---
-def get_llm_client(api_key):
-    return openai.OpenAI(api_key=api_key)
+# --- ФУНКЦИИ ГЕНЕРАЦИИ (GigaChat) ---
+def get_giga_client(credentials):
+    return GigaChat(
+        credentials=credentials,
+        scope="GIGACHAT_API_PERS",  # Для физлиц. Для юрлиц: GIGACHAT_API_CORP
+        model="GigaChat",            # Или "GigaChat-Pro" для более сложных задач
+        verify_ssl_certs=False       # Отключаем проверку SSL для простоты
+    )
 
-def generate_common_scenario(idea, api_key):
-    client = get_llm_client(api_key)
-    prompt = f"""
-    Ты — опытный продуктовый аналитик. 
-    Идея продукта: "{idea}"
-    
-    Предложи общий сценарий Customer Journey из 5-6 этапов для этой идеи.
-    Верни ответ СТРОГО в формате JSON-массива строк. Пример:
-    ["Осознание потребности", "Изучение продукта", "Настройка", "Первое использование", "Регулярное использование", "Вывод средств"]
-    """
+def call_gigachat(client, prompt):
+    """Универсальная функция вызова GigaChat с парсингом JSON"""
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o", # или gpt-3.5-turbo, или другая доступная модель
-            messages=[{"role": "user", "content": prompt}],
-            response_format={ "type": "json_object" }
+        response = client.chat(
+            Chat(messages=[Messages(role=MessagesRole.USER, content=prompt)])
         )
-        # Извлекаем массив из JSON {"scenario": ["этап1", "этап2"]}
-        # Мы попросим модель вернуть ключ "stages"
-        data = json.loads(response.choices[0].message.content)
-        # Обработка на случай, если модель вернула просто массив или объект
-        if isinstance(data, list):
-            return data
-        elif "stages" in data:
-            return data["stages"]
-        elif "scenario" in data:
-            return data["scenario"]
-        else:
-            return list(data.values())[0] # fallback
+        content = response.choices[0].message.content
+        
+        # GigaChat иногда оборачивает JSON в ```json ... ```
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+        
+        return json.loads(content.strip())
+    except json.JSONDecodeError as e:
+        st.error(f"Не удалось распарсить JSON от нейросети: {e}")
+        st.code(content[:500])  # Показываем кусок ответа для отладки
+        return None
     except Exception as e:
-        st.error(f"Ошибка генерации сценария: {e}")
-        return []
+        st.error(f"Ошибка вызова GigaChat: {e}")
+        return None
 
-def generate_persona_cjm(idea, persona, scenario_stages, api_key):
-    client = get_llm_client(api_key)
+def generate_common_scenario(idea, credentials):
+    client = get_giga_client(credentials)
+    prompt = f"""
+Ты — опытный продуктовый аналитик.
+Идея продукта: "{idea}"
+
+Предложи общий сценарий Customer Journey из 5-6 этапов для этой идеи.
+Верни ответ СТРОГО в формате JSON. Пример структуры:
+{{"stages": ["Этап 1", "Этап 2", "Этап 3", "Этап 4", "Этап 5"]}}
+
+Никакого текста вне JSON. Только валидный JSON-объект.
+"""
+    data = call_gigachat(client, prompt)
+    if not data:
+        return []
+    if isinstance(data, list):
+        return data
+    for key in ["stages", "scenario", "этапы"]:
+        if key in data:
+            return data[key]
+    return list(data.values())[0] if data else []
+
+def generate_persona_cjm(idea, persona, scenario_stages, credentials):
+    client = get_giga_client(credentials)
     
     persona_desc = f"Имя: {persona['name']}. Роль: {persona['role']}. Цель: {persona['goal']}. Боли: {persona.get('pains', 'Не указаны')}. Каналы: {persona.get('channels', 'Не указаны')}."
     
     prompt = f"""
-    Ты — опытный продуктовый аналитик и UX-исследователь.
-    Идея продукта: "{idea}"
-    Персона: {persona_desc}
-    Этапы сценария: {", ".join(scenario_stages)}
+Ты — опытный продуктовый аналитик и UX-исследователь.
+Идея продукта: "{idea}"
+Персона: {persona_desc}
+Этапы сценария: {", ".join(scenario_stages)}
 
-    Сгенерируй Customer Journey Map (CJM) для этой персоны по указанным этапам.
-    Верни ответ СТРОГО в формате JSON-массива объектов. Каждый объект должен содержать ровно эти ключи:
-    "Этап", "Действия", "Мысли", "Эмоции" (формат: "Эмодзи X/5 (Краткое описание)"), 
-    "Точки контакта", "Боли", "Решения", "Метрики".
-    
-    Пример формата:
-    [
-      {{
-        "Этап": "Осознание потребности",
-        "Действия": "Видит баннер в приложении",
-        "Мысли": "А это безопасно?",
-        "Эмоции": "😐 2/5 (Недоверие)",
-        "Точки контакта": "Главный экран, Push",
-        "Боли": "Страх скрытых комиссий",
-        "Решения": "Добавить плашку 'Без комиссий'",
-        "Метрики": "CTR баннера"
-      }}
-    ]
-    """
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={ "type": "json_object" }
-        )
-        data = json.loads(response.choices[0].message.content)
-        
-        # Извлекаем массив, независимо от того, как модель его назвала (cjm, stages, data и т.д.)
-        if isinstance(data, list):
-            return data
-        else:
-            # Ищем первый ключ, который является списком
-            for key, value in data.items():
-                if isinstance(value, list):
-                    return value
-            return [] # fallback
-            
-    except Exception as e:
-        st.error(f"Ошибка генерации CJM для {persona['name']}: {e}")
+Сгенерируй Customer Journey Map (CJM) для этой персоны по указанным этапам.
+Верни ответ СТРОГО в формате JSON-массива объектов. Каждый объект должен содержать ровно эти ключи:
+"Этап", "Действия", "Мысли", "Эмоции" (формат: "Эмодзи X/5 (Краткое описание)"),
+"Точки контакта", "Боли", "Решения", "Метрики".
+
+Пример структуры ответа:
+{{"cjm": [
+  {{
+    "Этап": "Название этапа",
+    "Действия": "Конкретное действие",
+    "Мысли": "Внутренний монолог",
+    "Эмоции": "🙂 4/5 (Радость)",
+    "Точки контакта": "Каналы",
+    "Боли": "Проблемы",
+    "Решения": "Гипотезы улучшений",
+    "Метрики": "Метрики успеха"
+  }}
+]}}
+
+Никакого текста вне JSON. Только валидный JSON-объект.
+"""
+    data = call_gigachat(client, prompt)
+    if not data:
         return []
+    if isinstance(data, list):
+        return data
+    for key in ["cjm", "data", "stages", "result"]:
+        if key in data and isinstance(data[key], list):
+            return data[key]
+    return []
 
 # --- ФУНКЦИИ ЭКСПОРТА ---
 def export_to_miro_csv(cjm_data, persona_name):
@@ -133,7 +142,11 @@ def export_to_mermaid(cjm_data, persona_name):
 with st.sidebar:
     st.header("⚙️ Настройки и Профили")
     
-    api_key = st.text_input("🔑 OpenAI API Key", type="password", help="Введите ваш ключ для генерации")
+    credentials = st.text_input(
+        "🔑 GigaChat Credentials", 
+        type="password", 
+        help="Скопируй из личного кабинета developers.sber.ru"
+    )
     
     st.markdown("---")
     st.subheader("👥 Профили (Персоны)")
@@ -145,7 +158,7 @@ with st.sidebar:
             p_goal = st.text_input("Главная цель *", placeholder="Напр: Сохранить деньги без потерь")
             
             st.markdown("**Опционально:**")
-            p_pains = st.text_area("Ключевые боли / Страхи", placeholder="Боится скрытых комиссий и сложных терминов")
+            p_pains = st.text_area("Ключевые боли / Страхи", placeholder="Боится скрытых комиссий")
             p_channels = st.text_input("Любимые каналы", placeholder="Мобильное приложение, Push")
             
             submitted = st.form_submit_button("Сохранить профиль")
@@ -170,7 +183,7 @@ with st.sidebar:
 
 # --- ИНТЕРФЕЙС: ОСНОВНАЯ ЧАСТЬ ---
 st.title("🗺️ Генератор Customer Journey Map")
-st.markdown("Введите идею, получите общий сценарий и адаптируйте его под выбранные профили с помощью AI.")
+st.markdown("Введите идею, получите общий сценарий и адаптируйте его под выбранные профили с помощью GigaChat AI.")
 
 idea = st.text_area("💡 Ваша новая идея или задача:", height=100, 
                     placeholder="Например: Сервис 'Инвесткопилка' на базе БПИФ Ликвидный (SCLI) с механиками автопополнения и округления трат.")
@@ -179,16 +192,16 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     if st.button("🧠 1. Предложить общий сценарий (AI)", use_container_width=True):
-        if not api_key:
-            st.warning("Пожалуйста, введите OpenAI API Key в боковой панели.")
+        if not credentials:
+            st.warning("Пожалуйста, введите GigaChat Credentials в боковой панели.")
         elif idea:
             with st.spinner("Нейросеть анализирует идею и строит сценарий..."):
                 st.session_state.current_idea = idea
-                st.session_state.common_scenario = generate_common_scenario(idea, api_key)
+                st.session_state.common_scenario = generate_common_scenario(idea, credentials)
                 if st.session_state.common_scenario:
                     st.success("Общий сценарий сгенерирован! Переходите к шагу 2.")
                 else:
-                    st.error("Не удалось сгенерировать сценарий. Проверьте API ключ.")
+                    st.error("Не удалось сгенерировать сценарий. Проверьте ключ и попробуйте снова.")
         else:
             st.warning("Сначала введите идею.")
 
@@ -201,15 +214,18 @@ with col2:
                 selected_personas.append(p)
         
         if st.button("🚀 2. Построить CJM для выбранных профилей (AI)", use_container_width=True, type="primary"):
-            if not api_key:
-                st.warning("Пожалуйста, введите OpenAI API Key в боковой панели.")
+            if not credentials:
+                st.warning("Пожалуйста, введите GigaChat Credentials в боковой панели.")
             else:
-                with st.spinner("Нейросеть генерирует CJM для каждого профиля... Это может занять 10-20 секунд."):
+                with st.spinner("Нейросеть генерирует CJM для каждого профиля... Это может занять 10-30 секунд."):
                     for p in selected_personas:
-                        cjm = generate_persona_cjm(idea, p, st.session_state.common_scenario, api_key)
+                        cjm = generate_persona_cjm(idea, p, st.session_state.common_scenario, credentials)
                         if cjm:
                             st.session_state.cjms[p['name']] = cjm
-                    st.success("CJM успешно построены! Прокрутите вниз.")
+                    if st.session_state.cjms:
+                        st.success("CJM успешно построены! Прокрутите вниз.")
+                    else:
+                        st.error("Не удалось сгенерировать CJM. Проверьте ключ.")
 
 # --- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ---
 if st.session_state.cjms:
