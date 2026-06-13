@@ -28,25 +28,53 @@ def get_giga_client(credentials):
         verify_ssl_certs=False       # Отключаем проверку SSL для простоты
     )
 
-def call_gigachat(client, prompt):
-    """Универсальная функция вызова GigaChat с парсингом JSON"""
+def call_gigachat(client, prompt, max_tokens=2000):
+    """Универсальная функция вызова GigaChat с улучшенным парсингом JSON"""
     try:
         response = client.chat(
-            Chat(messages=[Messages(role=MessagesRole.USER, content=prompt)])
+            Chat(messages=[Messages(role=MessagesRole.USER, content=prompt)]),
+            max_tokens=max_tokens,
+            temperature=0.3  # Меньше креативности, больше структуры
         )
         content = response.choices[0].message.content
         
-        # GigaChat иногда оборачивает JSON в ```json ... ```
+        # Очищаем от markdown-оберток
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
         elif "```" in content:
             content = content.split("```")[1].split("```")[0]
         
-        return json.loads(content.strip())
-    except json.JSONDecodeError as e:
-        st.error(f"Не удалось распарсить JSON от нейросети: {e}")
-        st.code(content[:500])  # Показываем кусок ответа для отладки
-        return None
+        content = content.strip()
+        
+        # Пытаемся распарсить
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            st.warning(f"⚠️ JSON поврежден, пытаюсь восстановить... Ошибка: {e}")
+            
+            # Пробуем найти начало и конец JSON
+            if content.startswith("{") or content.startswith("["):
+                # Ищем последнюю закрывающую скобку
+                if content.startswith("{"):
+                    # Ищем последнюю }
+                    last_brace = content.rfind("}")
+                    if last_brace > 0:
+                        content = content[:last_brace+1] + "]" if "cjm" in content else content[:last_brace+1]
+                elif content.startswith("["):
+                    last_bracket = content.rfind("]")
+                    if last_bracket > 0:
+                        content = content[:last_bracket+1]
+                
+                try:
+                    return json.loads(content)
+                except:
+                    pass
+            
+            # Если не получилось, показываем что получили
+            st.error("Не удалось восстановить JSON. Полученный ответ:")
+            st.code(content[:1000])
+            return None
+            
     except Exception as e:
         st.error(f"Ошибка вызова GigaChat: {e}")
         return None
@@ -58,17 +86,18 @@ def generate_common_scenario(idea, credentials):
 Идея продукта: "{idea}"
 
 Предложи общий сценарий Customer Journey из 5-6 этапов для этой идеи.
-Верни ответ СТРОГО в формате JSON. Пример структуры:
+
+Верни ответ СТРОГО в формате JSON без лишнего текста:
 {{"stages": ["Этап 1", "Этап 2", "Этап 3", "Этап 4", "Этап 5"]}}
 
-Никакого текста вне JSON. Только валидный JSON-объект.
+Будь лаконичен в названиях этапов (3-5 слов максимум).
 """
-    data = call_gigachat(client, prompt)
+    data = call_gigachat(client, prompt, max_tokens=500)
     if not data:
         return []
     if isinstance(data, list):
         return data
-    for key in ["stages", "scenario", "этапы"]:
+    for key in ["stages", "scenario", "этапы", "stages_names"]:
         if key in data:
             return data[key]
     return list(data.values())[0] if data else []
@@ -76,45 +105,39 @@ def generate_common_scenario(idea, credentials):
 def generate_persona_cjm(idea, persona, scenario_stages, credentials):
     client = get_giga_client(credentials)
     
-    persona_desc = f"Имя: {persona['name']}. Роль: {persona['role']}. Цель: {persona['goal']}. Боли: {persona.get('pains', 'Не указаны')}. Каналы: {persona.get('channels', 'Не указаны')}."
+    persona_desc = f"Имя: {persona['name']}. Роль: {persona['role']}. Цель: {persona['goal']}."
+    if persona.get('pains'):
+        persona_desc += f" Боли: {persona['pains']}."
+    
+    stages_str = ", ".join(scenario_stages)
     
     prompt = f"""
 Ты — опытный продуктовый аналитик и UX-исследователь.
-Идея продукта: "{idea}"
+Идея: "{idea}"
 Персона: {persona_desc}
-Этапы сценария: {", ".join(scenario_stages)}
+Этапы: {stages_str}
 
-Сгенерируй Customer Journey Map (CJM) для этой персоны по указанным этапам.
-Верни ответ СТРОГО в формате JSON-массива объектов. Каждый объект должен содержать ровно эти ключи:
-"Этап", "Действия", "Мысли", "Эмоции" (формат: "Эмодзи X/5 (Краткое описание)"),
-"Точки контакта", "Боли", "Решения", "Метрики".
-
-Пример структуры ответа:
+Сгенерируй CJM. Верни СТРОГО JSON:
 {{"cjm": [
-  {{
-    "Этап": "Название этапа",
-    "Действия": "Конкретное действие",
-    "Мысли": "Внутренний монолог",
-    "Эмоции": "🙂 4/5 (Радость)",
-    "Точки контакта": "Каналы",
-    "Боли": "Проблемы",
-    "Решения": "Гипотезы улучшений",
-    "Метрики": "Метрики успеха"
-  }}
+  {{"Этап": "Название", "Действия": "текст", "Мысли": "текст", "Эмоции": "🙂 4/5 (описание)", "Точки контакта": "каналы", "Боли": "проблемы", "Решения": "гипотезы", "Метрики": "метрики"}}
 ]}}
 
-Никакого текста вне JSON. Только валидный JSON-объект.
+Правила:
+1. Будь лаконичен (каждое поле 5-15 слов)
+2. Используй только указанные ключи
+3. Никакого текста вне JSON
+4. Закрой все скобки в конце
 """
-    data = call_gigachat(client, prompt)
+    data = call_gigachat(client, prompt, max_tokens=2500)
     if not data:
         return []
     if isinstance(data, list):
         return data
-    for key in ["cjm", "data", "stages", "result"]:
+    for key in ["cjm", "data", "stages", "result", "cjms"]:
         if key in data and isinstance(data[key], list):
             return data[key]
     return []
-
+    
 # --- ФУНКЦИИ ЭКСПОРТА ---
 def export_to_miro_csv(cjm_data, persona_name):
     df = pd.DataFrame(cjm_data)
