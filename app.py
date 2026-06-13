@@ -23,8 +23,9 @@ if 'cjms' not in st.session_state:
 def get_giga_client(credentials):
     return GigaChat(
         credentials=credentials,
-        scope="GIGACHAT_API_PERS",  # Для физлиц. Если не работает — поменяй на GIGACHAT_API_CORP
-        model="GigaChat"
+        scope="GIGACHAT_API_PERS",
+        model="GigaChat",
+        verify_ssl_certs=False  # Обязательно для GigaChat!
     )
 
 def call_gigachat(client, prompt, max_tokens=2000):
