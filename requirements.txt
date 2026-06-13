@@ -1,4 +1,3 @@
 streamlit
 pandas
-openai
-pip install gigachat
+gigachat
